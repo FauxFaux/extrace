@@ -1,6 +1,7 @@
 ALL=extrace pwait yes-exec
 
 CFLAGS=-g -O2 -Wall -Wno-switch -Wextra -Wwrite-strings -pedantic -ansi
+LDFLAGS=-pthread
 
 DESTDIR=
 PREFIX=/usr/local

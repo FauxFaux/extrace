@@ -61,6 +61,7 @@
 
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -97,12 +98,32 @@ sig_atomic_t quit = 0;
 uint32_t last_seq[CPU_MAX];
 
 #define PID_DB_SIZE 1024
-struct {
+struct Db {
 	pid_t pid;
 	int depth;
 	uint64_t start;
 	char cmdline[CMDLINE_DB_MAX];
 } pid_db[PID_DB_SIZE];
+
+pthread_mutex_t db_lock;
+
+#define QUEUE_SIZE 64
+struct Queue {
+	pid_t pid;
+	int proc_dir_fd;
+	uint64_t start;
+	char *cmdline;
+	ssize_t cmdline_end;
+} queue[QUEUE_SIZE];
+
+size_t queue_put = 0;
+size_t queue_take = 0;
+size_t queue_count = 0;
+
+pthread_t queue_thread;
+pthread_mutex_t queue_lock;
+pthread_cond_t queue_not_empty;
+pthread_cond_t queue_not_full;
 
 static int
 open_proc_dir(pid_t pid) {
@@ -296,6 +317,11 @@ print_extra(pid_t pid, int proc_dir_fd, const char *cmdline, uint64_t timestamp,
 		return;
 	}
 
+	if (0 != pthread_mutex_lock(&db_lock)) {
+		perror("mutex_lock(db_lock)");
+		return;
+	}
+
 	if (show_exit || !flat) {
 		for (i = 0; i < PID_DB_SIZE - 1; i++)
 			if (pid_db[i].pid == 0)
@@ -323,6 +349,12 @@ print_extra(pid_t pid, int proc_dir_fd, const char *cmdline, uint64_t timestamp,
 		strncpy(pid_db[i].cmdline, cmdline, CMDLINE_DB_MAX-1);
 		pid_db[i].cmdline[CMDLINE_DB_MAX-1] = 0;
 	}
+
+	if (0 != pthread_mutex_unlock(&db_lock)) {
+		perror("mutex_unlock(db_lock)");
+		return;
+	}
+
 	putc(' ', output);
 	if (show_cwd) {
 		print_shquoted(cwd);
@@ -354,16 +386,62 @@ print_extra(pid_t pid, int proc_dir_fd, const char *cmdline, uint64_t timestamp,
 	fflush(output);
 }
 
+void *
+queue_worker(void *thread_data) {
+	(void) thread_data;
+
+	for (;;) {
+		struct Queue item;
+
+		if (0 != pthread_mutex_lock(&queue_lock)) {
+			perror("mutex_lock");
+			return NULL;
+		}
+
+		while (0 == queue_count) {
+			if (0 != pthread_cond_wait(&queue_not_empty, &queue_lock)) {
+				perror("pthread_cond_wait(not_empty)");
+				return NULL;
+			}
+		}
+
+		item = queue[queue_take];
+
+		if (++queue_take == QUEUE_SIZE)
+			queue_take = 0;
+
+		queue_count--;
+
+		if (0 != pthread_cond_signal(&queue_not_full)) {
+			perror("cond_signal(not_full)");
+			return NULL;
+		}
+
+		if (0 != pthread_mutex_unlock(&queue_lock)) {
+			perror("mutex_unlock");
+			return NULL;
+		}
+
+		print_extra(
+				item.pid,
+				item.proc_dir_fd,
+				item.cmdline,
+				item.start,
+				item.cmdline_end);
+
+		free(item.cmdline);
+	}
+}
+
 static void
 handle_msg(struct cn_msg *cn_hdr)
 {
-	char cmdline[CMDLINE_MAX];
-
 	ssize_t cmdline_end = 0;
 	int fd;
 	struct proc_event *ev = (struct proc_event *)cn_hdr->data;
 
 	if (ev->what == PROC_EVENT_EXEC) {
+		char *cmdline;
 		pid_t pid = ev->event_data.exec.process_pid;
 		int proc_dir_fd = open_proc_dir(pid);
 		if (proc_dir_fd < 0) {
@@ -372,24 +450,68 @@ handle_msg(struct cn_msg *cn_hdr)
 			return;
 		}
 
-		memset(&cmdline, 0, sizeof cmdline);
+		cmdline = calloc(CMDLINE_MAX, 1);
 		fd = openat(proc_dir_fd, "cmdline", O_RDONLY);
 		if (fd >= 0) {
-			cmdline_end = read(fd, cmdline, sizeof cmdline);
+			cmdline_end = read(fd, cmdline, CMDLINE_MAX);
 			close(fd);
 
 			if (cmdline_end > 0)
 				cmdline[cmdline_end] = 0;
 		}
 
-		print_extra(pid, proc_dir_fd, cmdline, ev->timestamp_ns, cmdline_end);
+		if (0 != pthread_mutex_lock(&queue_lock)) {
+			perror("pthread_mutex_lock");
+			free(cmdline);
+			return;
+		}
+
+		while (queue_count == sizeof queue) {
+			fprintf(stderr, "queue overfill\n");
+			if (0 != pthread_cond_wait(&queue_not_full, &queue_lock)) {
+				perror("pthread_cond_wait(not_full)");
+				free(cmdline);
+				return;
+			}
+		}
+
+		queue[queue_put].pid = pid;
+		queue[queue_put].proc_dir_fd = proc_dir_fd;
+		queue[queue_put].cmdline = cmdline;
+		queue[queue_put].cmdline_end = cmdline_end;
+		queue[queue_put].start = ev->timestamp_ns;
+
+		if (++queue_put == QUEUE_SIZE) {
+			queue_put = 0;
+		}
+
+		queue_count++;
+
+		if (0 != pthread_cond_signal(&queue_not_empty)) {
+			perror("cond_signal(not_empty)");
+		}
+
+		if (0 != pthread_mutex_unlock(&queue_lock)) {
+			perror("pthread_mutex_unlock");
+		}
 	} else if ((show_exit || !flat) && ev->what == PROC_EVENT_EXIT) {
 		pid_t pid = ev->event_data.exit.process_pid;
 		int i;
 
+		if (0 != pthread_mutex_lock(&db_lock)) {
+			perror("mutex_lock(db_lock)");
+			return;
+		}
+
 		for (i = 0; i < PID_DB_SIZE; i++)
 			if (pid_db[i].pid == pid)
 				break;
+
+		if (0 != pthread_mutex_unlock(&db_lock)) {
+			perror("mutex_unlock(db_lock)");
+			return;
+		}
+
 		if (i == PID_DB_SIZE)
 			return;
 
@@ -456,6 +578,26 @@ main(int argc, char *argv[])
 	if (parent != 1 && optind != argc) {
 usage:
 		fprintf(stderr, "Usage: extrace [-deflqt] [-o FILE] [-p PID|CMD...]\n");
+		exit(1);
+	}
+
+	if (0 != pthread_mutex_init(&queue_lock, NULL)) {
+		perror("pthread_mutex_init");
+		exit(1);
+	}
+
+	if (0 != pthread_cond_init(&queue_not_empty, NULL)) {
+		perror("pthread_mutex_init(not_empty)");
+		exit(1);
+	}
+
+	if (0 != pthread_cond_init(&queue_not_full, NULL)) {
+		perror("pthread_mutex_init(not_full)");
+		exit(1);
+	}
+
+	if (0 != pthread_create(&queue_thread, NULL, queue_worker, NULL)) {
+		perror("pthread_create");
 		exit(1);
 	}
 
