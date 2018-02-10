@@ -267,20 +267,104 @@ print_env(int proc_dir_fd)
 }
 
 static void
+print_extra(pid_t pid, int proc_dir_fd, const char *cmdline, uint64_t timestamp, ssize_t cmdline_end) {
+	char exe[PATH_MAX];
+	char cwd[PATH_MAX];
+	ssize_t r2 = 0, r3 = 0;
+	int d;
+	int i = 0;
+	char *argvrest;
+
+	argvrest = strchr(cmdline, 0) + 1;
+
+	if (full_path) {
+		r2 = readlinkat(proc_dir_fd, "exe", exe, sizeof exe);
+		if (r2 > 0)
+			exe[r2] = 0;
+	}
+
+	d = pid_depth(pid);
+	if (d < 0) {
+		if (*cmdline) {
+			fprintf(stderr, "warning: process vanished before "
+					"we found its parent: %d: %s\n", pid, cmdline);
+		} else {
+			fprintf(stderr, "warning: process vanished without "
+					"a name: %d\n", pid);
+		}
+		close(proc_dir_fd);
+		return;
+	}
+
+	if (show_exit || !flat) {
+		for (i = 0; i < PID_DB_SIZE - 1; i++)
+			if (pid_db[i].pid == 0)
+				break;
+		if (i == PID_DB_SIZE - 1)
+			fprintf(stderr, "extrace: warning pid_db of "
+					"size %d overflowed\n", PID_DB_SIZE);
+
+		pid_db[i].pid = pid;
+		pid_db[i].depth = d;
+		pid_db[i].start = timestamp;
+	}
+
+	if (show_cwd) {
+		r3 = readlinkat(proc_dir_fd, "cwd", cwd, sizeof cwd);
+		if (r3 > 0)
+			cwd[r3] = 0;
+	}
+
+	if (!flat)
+		fprintf(output, "%*s", 2*d, "");
+	fprintf(output, "%d", pid);
+	if (show_exit) {
+		putc('+', output);
+		strncpy(pid_db[i].cmdline, cmdline, CMDLINE_DB_MAX-1);
+		pid_db[i].cmdline[CMDLINE_DB_MAX-1] = 0;
+	}
+	putc(' ', output);
+	if (show_cwd) {
+		print_shquoted(cwd);
+		fprintf(output, " %% ");
+	}
+
+	if (full_path)
+		print_shquoted(exe);
+	else
+		print_shquoted(cmdline);
+
+	if (show_args && cmdline_end > 0) {
+		while (argvrest - cmdline < cmdline_end) {
+			putc(' ', output);
+			print_shquoted(argvrest);
+			argvrest = strchr(argvrest, 0)+1;
+		}
+	}
+
+	if (cmdline_end == CMDLINE_MAX)
+		fprintf(output, "... <truncated>");
+
+	if (show_env)
+		print_env(proc_dir_fd);
+
+	close(proc_dir_fd);
+
+	fprintf(output, "\n");
+	fflush(output);
+}
+
+static void
 handle_msg(struct cn_msg *cn_hdr)
 {
 	char cmdline[CMDLINE_MAX];
-	char exe[PATH_MAX];
-	char cwd[PATH_MAX];
-	char *argvrest;
 
-	ssize_t r = 0, r2 = 0, r3 = 0;
-	int fd, d;
+	ssize_t cmdline_end = 0;
+	int fd;
 	struct proc_event *ev = (struct proc_event *)cn_hdr->data;
 
 	if (ev->what == PROC_EVENT_EXEC) {
 		pid_t pid = ev->event_data.exec.process_pid;
-		int i = 0;
 		int proc_dir_fd = open_proc_dir(pid);
 		if (proc_dir_fd < 0) {
 			fprintf(stderr, "warning: process vanished before "
@@ -291,90 +375,14 @@ handle_msg(struct cn_msg *cn_hdr)
 		memset(&cmdline, 0, sizeof cmdline);
 		fd = openat(proc_dir_fd, "cmdline", O_RDONLY);
 		if (fd >= 0) {
-			r = read(fd, cmdline, sizeof cmdline);
+			cmdline_end = read(fd, cmdline, sizeof cmdline);
 			close(fd);
 
-			if (r > 0)
-				cmdline[r] = 0;
-
-			if (full_path) {
-				r2 = readlinkat(proc_dir_fd, "exe", exe, sizeof exe);
-				if (r2 > 0)
-					exe[r2] = 0;
-			}
-
-			argvrest = strchr(cmdline, 0) + 1;
+			if (cmdline_end > 0)
+				cmdline[cmdline_end] = 0;
 		}
 
-		d = pid_depth(pid);
-		if (d < 0) {
-			if (*cmdline) {
-				fprintf(stderr, "warning: process vanished before "
-					"we found its parent: %d: %s\n", pid, cmdline);
-			} else {
-				fprintf(stderr, "warning: process vanished without "
-					"a name: %d\n", pid);
-			}
-			close(proc_dir_fd);
-			return;
-		}
-
-		if (show_exit || !flat) {
-			for (i = 0; i < PID_DB_SIZE - 1; i++)
-				if (pid_db[i].pid == 0)
-					break;
-			if (i == PID_DB_SIZE - 1)
-				fprintf(stderr, "extrace: warning pid_db of "
-				    "size %d overflowed\n", PID_DB_SIZE);
-
-			pid_db[i].pid = pid;
-			pid_db[i].depth = d;
-			pid_db[i].start = ev->timestamp_ns;
-		}
-
-		if (show_cwd) {
-			r3 = readlinkat(proc_dir_fd, "cwd", cwd, sizeof cwd);
-			if (r3 > 0)
-				cwd[r3] = 0;
-		}
-
-		if (!flat)
-			fprintf(output, "%*s", 2*d, "");
-		fprintf(output, "%d", pid);
-		if (show_exit) {
-			putc('+', output);
-			strncpy(pid_db[i].cmdline, cmdline, CMDLINE_DB_MAX-1);
-			pid_db[i].cmdline[CMDLINE_DB_MAX-1] = 0;
-		}
-		putc(' ', output);
-		if (show_cwd) {
-			print_shquoted(cwd);
-			fprintf(output, " %% ");
-		}
-
-		if (full_path)
-			print_shquoted(exe);
-		else
-			print_shquoted(cmdline);
-
-		if (show_args && r > 0) {
-			while (argvrest - cmdline < r) {
-				putc(' ', output);
-				print_shquoted(argvrest);
-				argvrest = strchr(argvrest, 0)+1;
-			}
-		}
-
-		if (r == sizeof cmdline)
-			fprintf(output, "... <truncated>");
-
-		if (show_env)
-			print_env(proc_dir_fd);
-
-		close(proc_dir_fd);
-
-		fprintf(output, "\n");
-		fflush(output);
+		print_extra(pid, proc_dir_fd, cmdline, ev->timestamp_ns, cmdline_end);
 	} else if ((show_exit || !flat) && ev->what == PROC_EVENT_EXIT) {
 		pid_t pid = ev->event_data.exit.process_pid;
 		int i;
