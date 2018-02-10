@@ -106,7 +106,6 @@
 #define RECV_MESSAGE_SIZE    (NLMSG_SPACE(RECV_MESSAGE_LEN))
 
 #define BUFF_SIZE (max(max(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE), 1024))
-#define MIN_RECV_SIZE (min(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE))
 
 sig_atomic_t quit = 0;
 
@@ -144,7 +143,7 @@ main(int argc, char *argv[])
 	struct cn_msg *cn_hdr;
 	struct proc_event *ev;
 	enum proc_cn_mcast_op *mcop_msg;
-	size_t recv_len = 0;
+	ssize_t recv_len = 0;
 	int opt;
 	int n;
 	pid_t *pids;

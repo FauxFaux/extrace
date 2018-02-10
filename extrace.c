@@ -81,13 +81,11 @@
 #define RECV_MESSAGE_SIZE (NLMSG_SPACE(RECV_MESSAGE_LEN))
 
 #define BUFF_SIZE (max(max(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE), 1024))
-#define MIN_RECV_SIZE (min(SEND_MESSAGE_SIZE, RECV_MESSAGE_SIZE))
 
 #define CMDLINE_MAX 32768
 #define CMDLINE_DB_MAX 32
 pid_t parent = 1;
 int flat = 0;
-int run = 0;
 int full_path = 0;
 int show_args = 1;
 int show_cwd = 0;
@@ -119,7 +117,7 @@ pid_depth(pid_t pid)
 	pid_t ppid = 0;
 	FILE *f;
 	char name[PATH_MAX];
-	int d, i;
+	int d = -1, i;
 
 	snprintf(name, sizeof name, "/proc/%d/stat", pid);
 
@@ -276,7 +274,8 @@ handle_msg(struct cn_msg *cn_hdr)
 	char cwd[PATH_MAX];
 	char *argvrest;
 
-	int r = 0, r2 = 0, r3 = 0, fd, d;
+	ssize_t r = 0, r2 = 0, r3 = 0;
+	int fd, d;
 	struct proc_event *ev = (struct proc_event *)cn_hdr->data;
 
 	if (ev->what == PROC_EVENT_EXEC) {
@@ -421,7 +420,7 @@ main(int argc, char *argv[])
 	struct cn_msg *cn_hdr, *cmsg;
 	struct proc_event *cproc;
 	enum proc_cn_mcast_op *mcop_msg;
-	size_t recv_len = 0;
+	ssize_t recv_len = 0;
 	int rc = -1, opt;
 
 	output = stdout;
