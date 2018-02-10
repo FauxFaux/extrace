@@ -284,7 +284,8 @@ handle_msg(struct cn_msg *cn_hdr)
 		int i = 0;
 		int proc_dir_fd = open_proc_dir(pid);
 		if (proc_dir_fd < 0) {
-			/* TODO: warn we dropped something? */
+			fprintf(stderr, "warning: process vanished before "
+				"we even got the message: %d\n", pid);
 			return;
 		}
 
@@ -308,6 +309,13 @@ handle_msg(struct cn_msg *cn_hdr)
 
 		d = pid_depth(pid);
 		if (d < 0) {
+			if (*cmdline) {
+				fprintf(stderr, "warning: process vanished before "
+					"we found its parent: %d: %s\n", pid, cmdline);
+			} else {
+				fprintf(stderr, "warning: process vanished without "
+					"a name: %d\n", pid);
+			}
 			close(proc_dir_fd);
 			return;
 		}
