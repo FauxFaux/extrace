@@ -14,6 +14,8 @@ int main(int argc, char *argv[]) {
 		return 2;
 	}
 
+	fclose(stdin);
+
 	count = atol(argv[1]);
 
 	for (i = 0; i < count; ++i) {
