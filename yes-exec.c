@@ -21,7 +21,7 @@ int main(int argc, char *argv[]) {
 		pid_t forked = vfork();
 
 		if (0 == forked) {
-			execv(argv[2], argv + 1);
+			execv(argv[2], argv + 2);
 			perror("exec failed");
 			_exit(1);
 		}
